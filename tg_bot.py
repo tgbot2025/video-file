@@ -5,23 +5,24 @@ import threading
 import time
 import traceback
 
-# ========== CONFIG (Change only if needed) ==========
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # set this in Render env vars
-CHANNEL_USERNAME = "@ViralCityBD"   # the channel to check membership
-ADMIN_ID = 6705245237               # your telegram numeric ID (you are admin)
-UPDATE_CHANNEL_URL = "https://t.me/+inmCyx05zdMyNTll"
-VIDEO_STORE_FILE = "current_video.txt"  # persistent storage for file_id
-DELETE_AFTER = 900  # seconds (15 minutes)
-# ====================================================
-
+# ========== CONFIG - edit these before pushing ==========
+# BOT_TOKEN should be set as environment variable (Render) or set locally for testing.
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set. Set BOT_TOKEN before running.")
+
+CHANNEL_USERNAME = "@ViralCityBD"   # change if different
+ADMIN_ID = 6705245237               # your numeric Telegram ID
+UPDATE_CHANNEL_URL = "https://t.me/+inmCyx05zdMyNTll"
+VIDEO_STORE_FILE = "current_video.txt"  # persistent file for file_id
+DELETE_AFTER = 900  # seconds = 15 minutes
+# =======================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
 
-# ---------- helpers: persist video file_id ----------
-def save_video_file_id(file_id: str):
+# ---------- persistence ----------
+def save_file_id(file_id: str):
     try:
         with open(VIDEO_STORE_FILE, "w", encoding="utf-8") as f:
             f.write(file_id)
@@ -29,7 +30,7 @@ def save_video_file_id(file_id: str):
         traceback.print_exc()
 
 
-def load_video_file_id():
+def load_file_id():
     try:
         if os.path.exists(VIDEO_STORE_FILE):
             with open(VIDEO_STORE_FILE, "r", encoding="utf-8") as f:
@@ -40,7 +41,7 @@ def load_video_file_id():
     return None
 
 
-# ---------- helper: delete messages after delay ----------
+# ---------- delete helper (per-user only) ----------
 def schedule_delete(chat_id: int, *message_ids):
     def _del():
         time.sleep(DELETE_AFTER)
@@ -52,38 +53,37 @@ def schedule_delete(chat_id: int, *message_ids):
     threading.Thread(target=_del, daemon=True).start()
 
 
-# ---------- helper: join prompt ----------
-def send_join_prompt(chat_id: int):
+# ---------- join prompt ----------
+def send_join_prompt(chat_id):
     markup = telebot.types.InlineKeyboardMarkup()
-    # Join Channel button (text "Join Channel")
     join_btn = telebot.types.InlineKeyboardButton("🔗 Join Channel", url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}")
-    try_again = telebot.types.InlineKeyboardButton("✅ Try Again", callback_data="check_join")
+    try_btn = telebot.types.InlineKeyboardButton("✅ Try Again", callback_data="check_join")
+    # put join button full width then try again (2 rows)
     markup.add(join_btn)
-    markup.add(try_again)
+    markup.add(try_btn)
     bot.send_message(chat_id, "👋 Please join my update channel to use me!", reply_markup=markup)
 
 
-# ---------- /start handler ----------
+# ---------- /start ----------
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    current_video = load_video_file_id()
+    current_file_id = load_file_id()
 
     try:
-        # check membership; NOTE: bot must be admin in the channel for reliable results
+        # check membership (bot must be admin in channel for reliable result)
         member = bot.get_chat_member(CHANNEL_USERNAME, user_id)
         status = getattr(member, "status", None)
         if status in ("member", "creator", "administrator"):
-            # allowed -> send video + separate info message + update channel button
-            if not current_video:
+            if not current_file_id:
                 bot.send_message(chat_id, "🚫 Currently no video available. Admin can set one with /update.")
                 return
 
-            # send video (without caption)
-            sent_vid = bot.send_video(chat_id, current_video)
+            # send video (file_id) to this user
+            sent_vid = bot.send_video(chat_id, current_file_id)
 
-            # send the important notice as a separate message (styled)
+            # send separate styled notice message + update channel button
             notice_text = (
                 "⚠️ *Important:*\n"
                 "All Messages will be deleted after *15 minutes*.\n\n"
@@ -94,58 +94,44 @@ def cmd_start(message):
 
             sent_notice = bot.send_message(chat_id, notice_text, parse_mode="Markdown", reply_markup=markup)
 
-            # schedule deletion of both messages after DELETE_AFTER seconds
+            # schedule deletion of both messages for this user only
             schedule_delete(chat_id, sent_vid.message_id, sent_notice.message_id)
 
         else:
-            # not a member
             send_join_prompt(chat_id)
 
     except Exception as e:
-        # fallback to join prompt on any error (e.g., bot not admin in channel)
-        # log for debugging
+        # if any error (e.g., bot not admin in channel), fallback to join prompt
         print("get_chat_member error:", e)
         send_join_prompt(chat_id)
 
 
-# ---------- callback: Try Again ----------
+# ---------- callback for Try Again ----------
 @bot.callback_query_handler(func=lambda call: call.data == "check_join")
 def callback_check_join(call):
-    # short delay to allow telegram to update membership after user joined
     try:
         bot.answer_callback_query(call.id, "Checking membership...")
     except Exception:
         pass
-    time.sleep(2)
-    # re-run start logic
+    time.sleep(2)  # give Telegram a moment if user just joined
     cmd_start(call.message)
 
 
-# ---------- /update handler (admin only) ----------
+# ---------- /update (admin only) ----------
 @bot.message_handler(commands=['update'])
 def cmd_update(message):
     if message.from_user.id != ADMIN_ID:
-        bot.send_message(message.chat.id, "⛔️ You are not authorized to update videos.")
+        bot.send_message(message.chat.id, "⛔️ তুমি অ্যাডমিন নও।")
         return
 
-    bot.send_message(message.chat.id, "📤 Please send the new video file (or forward one) now. It will replace the current video.")
-    # register next step to accept the video
-    bot.register_next_step_handler(message, receive_video_for_update)
+    bot.send_message(message.chat.id, "📤 এখন ভিডিও পাঠাও (এই চ্যাটে)।")
+    bot.register_next_step_handler(message, save_video)
 
 
-def receive_video_for_update(message):
+def save_video(message):
     if message.video:
         file_id = message.video.file_id
-        save_video_file_id(file_id)
-        bot.send_message(message.chat.id, "✅ Video updated and saved successfully!")
+        save_file_id(file_id)
+        bot.reply_to(message, "✅ ভিডিও সফলভাবে আপডেট ও সংরক্ষিত হয়েছে!")
     else:
-        bot.send_message(message.chat.id, "❌ No video detected. Please send a video file.")
-
-
-# ---------- start polling ----------
-if __name__ == "__main__":
-    print("✅ tg_bot is starting...")
-    # load once to ensure file exists / readable
-    _ = load_video_file_id()
-    # poll with some timeout to reduce read timeouts
-    bot.polling(none_stop=True, interval=5, timeout=60)
+        bot.reply_to(message, "❌ দয়া করে একটি ভিডিও ফাইল পাঠাও।")
